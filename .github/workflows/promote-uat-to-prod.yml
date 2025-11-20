@@ -1,45 +1,42 @@
-name: "3. Promote UAT to Prod"
+name: "3. Deploy to Production"
 
 on:
   workflow_dispatch:
     inputs:
-      deployment_commit:
-        description: 'Specific commit SHA from UAT that was tested'
+      feature_branch:
+        description: 'Your original feature branch name'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Same commit SHA that was tested in DEV and UAT'
         required: true
         type: string
       deployment_reason:
         description: 'Reason for production deployment'
         required: true
         type: string
-        default: 'UAT testing successful'
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  promote-to-prod:
+  create-prod-pr:
     runs-on: ubuntu-latest
-    environment: prod
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate commit
-        id: validate-commit
+        id: validate
         run: |
-          COMMIT_SHA="${{ github.event.inputs.deployment_commit }}"
-          echo "Validating commit: $COMMIT_SHA"
+          FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
+          COMMIT_SHA="${{ github.event.inputs.commit_sha }}"
           
-          if [ -z "$COMMIT_SHA" ]; then
-            echo "❌ Error: Commit SHA is empty"
-            echo "💡 Please provide a valid commit SHA from the uat branch"
-            exit 1
-          fi
+          echo "Validating commit $COMMIT_SHA for production"
           
           # Verify commit exists
           if ! git cat-file -e $COMMIT_SHA^{commit} 2>/dev/null; then
@@ -47,116 +44,85 @@ jobs:
             exit 1
           fi
           
-          # Verify commit is in uat branch
+          # Verify commit is in uat branch (was promoted to UAT)
           git fetch origin uat
           if ! git merge-base --is-ancestor $COMMIT_SHA origin/uat 2>/dev/null; then
             echo "❌ Error: Commit $COMMIT_SHA is not in uat branch"
-            echo "💡 Make sure the commit has been promoted to UAT first"
+            echo "💡 Make sure this commit was promoted to UAT first"
             exit 1
           fi
           
           # Get commit details
           COMMIT_INFO=$(git log $COMMIT_SHA -1 --format="%h - %s - %an - %ad")
-          COMMIT_AUTHOR=$(git log $COMMIT_SHA -1 --format="%an")
-          COMMIT_MESSAGE=$(git log $COMMIT_SHA -1 --format="%s")
-          
-          # Proper output format
-          {
-            echo "commit_info<<EOF"
-            echo "$COMMIT_INFO"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-          
-          echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
-          echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
-          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
-          
+          echo "commit_info=$COMMIT_INFO" >> $GITHUB_OUTPUT
           echo "✅ Commit validated: $COMMIT_INFO"
 
-      - name: Create production promotion PR
+      - name: Create Production PR
         uses: actions/github-script@v7
-        env:
-          COMMIT_SHA: ${{ env.COMMIT_SHA }}
-          DEPLOYMENT_REASON: ${{ github.event.inputs.deployment_reason }}
         with:
           script: |
-            const commitSha = process.env.COMMIT_SHA;
-            const deploymentReason = process.env.DEPLOYMENT_REASON;
-            const commitInfo = `${{ steps.validate-commit.outputs.commit_info }}`;
-            const commitAuthor = '${{ steps.validate-commit.outputs.commit_author }}';
-            const commitMessage = '${{ steps.validate-commit.outputs.commit_message }}';
+            const featureBranch = '${{ github.event.inputs.feature_branch }}';
+            const commitSha = '${{ github.event.inputs.commit_sha }}';
+            const deploymentReason = '${{ github.event.inputs.deployment_reason }}';
+            const commitInfo = '${{ steps.validate.outputs.commit_info }}';
             
-            // Create unique promotion branch
-            const timestamp = Date.now();
-            const promoteBranch = `promote/prod-${commitSha.substring(0, 8)}-${timestamp}`;
+            // Create promotion branch
+            const promoteBranch = `promote/prod-${featureBranch.replace(/\//g, '-')}-${Date.now()}`;
             
-            try {
-              // Get current prod SHA
-              const { data: prodRef } = await github.rest.repos.getBranch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                branch: 'prod'
-              });
-              
-              // Create promotion branch from prod
-              await github.rest.git.createRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: `refs/heads/${promoteBranch}`,
-                sha: prodRef.commit.sha
-              });
-              
-              // Merge the specific commit into promotion branch
-              await github.rest.repos.merge({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                base: promoteBranch,
-                head: commitSha
-              });
-              
-              const prBody = `
-              ## 🟢 Production Deployment
-              **Commit:** ${commitInfo}
-              **SHA:** ${commitSha}
-              **Author:** ${commitAuthor}
-              **Message:** ${commitMessage}
-              **Deployment Reason:** ${deploymentReason}
-              
-              ### Verification Status:
-              ✅ Tested in DEV Environment
-              ✅ Verified in UAT Environment  
-              ✅ Ready for Production
-              
-              ### Change Details:
-              \`\`\`
-              ${commitMessage}
-              \`\`\`
-              
-              **Approval Required**: Manager/Director approval required for production deployment.
-              
-              *Auto-generated by GitHub Actions*
-              `;
-              
-              const { data: pr } = await github.rest.pulls.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `🟢 PROD: Deploy ${commitSha.substring(0, 8)} - ${commitMessage.substring(0, 50)}${commitMessage.length > 50 ? '...' : ''}`,
-                body: prBody,
-                head: promoteBranch,
-                base: 'prod'
-              });
-              
-              console.log(`✅ Created Production deployment PR: ${pr.html_url}`);
-              
-              // Add labels
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                labels: ['production', 'specific-commit', 'environment-prod']
-              });
-              
-            } catch (error) {
-              console.error('❌ Failed to create production promotion PR:', error);
-              throw error;
-            }
+            // Get current prod branch
+            const { data: prodRef } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'prod'
+            });
+            
+            // Create branch from prod
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/heads/${promoteBranch}`,
+              sha: prodRef.commit.sha
+            });
+            
+            // Merge the specific commit that was tested in UAT
+            await github.rest.repos.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base: promoteBranch,
+              head: commitSha
+            });
+            
+            const prBody = `
+            ## 🟢 Production Deployment
+            **Feature Branch:** ${featureBranch}
+            **Commit SHA:** ${commitSha}
+            **Commit Details:** ${commitInfo}
+            **Deployment Reason:** ${deploymentReason}
+            
+            **This contains ONLY your specific changes that were tested in DEV & UAT.**
+            
+            **Verification Status:**
+            ✅ Tested in DEV Environment
+            ✅ Verified in UAT Environment  
+            ✅ Ready for Production
+            
+            **Approval Required:** Manager/Director approval required.
+            `;
+            
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🟢 PROD: Deploy ${featureBranch} (${commitSha.substring(0, 8)})`,
+              body: prBody,
+              head: promoteBranch,
+              base: 'prod'
+            });
+            
+            console.log(`✅ Created Production deployment PR: ${pr.html_url}`);
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: ['production', 'specific-commit']
+            });
