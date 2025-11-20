@@ -1,6 +1,11 @@
 name: "2. Promote Dev to UAT"
 
 on:
+  # Add these to make workflow visible in Actions tab
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [uat]
   workflow_dispatch:
     inputs:
       deployment_commit:
@@ -54,7 +59,13 @@ jobs:
           COMMIT_AUTHOR=$(git log $COMMIT_SHA -1 --format="%an")
           COMMIT_MESSAGE=$(git log $COMMIT_SHA -1 --format="%s")
           
-          echo "commit_info=$COMMIT_INFO" >> $GITHUB_OUTPUT
+          # FIX: Proper output format
+          {
+            echo "commit_info<<EOF"
+            echo "$COMMIT_INFO"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
           echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
@@ -70,7 +81,7 @@ jobs:
           script: |
             const commitSha = process.env.COMMIT_SHA;
             const deploymentReason = process.env.DEPLOYMENT_REASON;
-            const commitInfo = '${{ steps.validate-commit.outputs.commit_info }}';
+            const commitInfo = `${{ steps.validate-commit.outputs.commit_info }}`;
             const commitAuthor = '${{ steps.validate-commit.outputs.commit_author }}';
             const commitMessage = '${{ steps.validate-commit.outputs.commit_message }}';
             
