@@ -1,0 +1,19 @@
+name: Simple Test
+
+on:
+  push:
+    branches: [ravi_changes]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Simple echo
+        run: |
+          echo "✅ GitHub Actions is working!"
+          echo "Branch: ${{ github.ref }}"
+          ls -la
