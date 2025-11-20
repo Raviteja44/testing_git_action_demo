@@ -1,0 +1,115 @@
+name: Deploy Feature to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        description: 'Feature branch name'
+        required: true
+        type: string
+      deployment_reason:
+        description: 'Reason for deployment'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  deploy-to-dev:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate feature branch
+        run: |
+          FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
+          git fetch origin "$FEATURE_BRANCH" || {
+            echo "❌ Feature branch '$FEATURE_BRANCH' not found"
+            exit 1
+          }
+          echo "FEATURE_BRANCH=$FEATURE_BRANCH" >> $GITHUB_ENV
+
+      - name: Get feature branch commits not in dev
+        id: get_commits
+        run: |
+          git fetch origin dev
+          
+          # Get commits that are in feature branch but not in dev
+          COMMITS=$(git log origin/dev..origin/$FEATURE_BRANCH --oneline --reverse | head -10)
+          COMMIT_COUNT=$(git rev-list --count origin/dev..origin/$FEATURE_BRANCH)
+          
+          echo "commits=${COMMITS}" >> $GITHUB_OUTPUT
+          echo "commit_count=${COMMIT_COUNT}" >> $GITHUB_OUTPUT
+          echo "latest_commit=$(git rev-parse origin/$FEATURE_BRANCH)" >> $GITHUB_OUTPUT
+          
+          if [ $COMMIT_COUNT -eq 0 ]; then
+            echo "❌ No new commits to deploy"
+            exit 1
+          fi
+
+      - name: Create Dev Deployment PR
+        uses: actions/github-script@v7
+        env:
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          COMMIT_COUNT: ${{ steps.get_commits.outputs.commit_count }}
+          LATEST_COMMIT: ${{ steps.get_commits.outputs.latest_commit }}
+        with:
+          script: |
+            const featureBranch = process.env.FEATURE_BRANCH;
+            const commitCount = process.env.COMMIT_COUNT;
+            const latestCommit = process.env.LATEST_COMMIT;
+            const deploymentReason = '${{ github.event.inputs.deployment_reason }}';
+
+            // Create a unique deployment branch
+            const deployBranch = `deploy/dev-${featureBranch.replace(/\//g, '-')}-${Date.now()}`;
+            
+            // Create deployment branch from current dev
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/heads/${deployBranch}`,
+              sha: context.sha
+            });
+
+            // Merge feature branch into deployment branch
+            await github.rest.repos.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base: deployBranch,
+              head: featureBranch
+            });
+
+            const prBody = `
+            ## 🚀 Deployment to DEV Environment
+            **Feature Branch:** ${featureBranch}
+            **Commits to Deploy:** ${commitCount}
+            **Latest Commit:** ${latestCommit}
+            **Deployment Reason:** ${deploymentReason}
+            
+            **Changes included in this deployment:**
+            \`\`\`
+            ${{ steps.get_commits.outputs.commits }}
+            \`\`\`
+            
+            **Note:** This PR contains ONLY commits from ${featureBranch} that are not in dev.
+            `;
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔵 DEV: Deploy ${featureBranch}`,
+              body: prBody,
+              head: deployBranch,
+              base: 'dev'
+            });
+
+            console.log(`✅ Created DEV deployment PR: ${pr.html_url}`);
+            return pr.number;

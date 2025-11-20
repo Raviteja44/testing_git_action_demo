@@ -1,0 +1,43 @@
+name: On Merge Deploy
+
+on:
+  pull_request:
+    branches: [dev, uat, prod]
+    types: [closed]
+
+jobs:
+  deploy-on-merge:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.pull_request.base.ref }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract branch info
+        id: extract_branch
+        run: |
+          echo "PR merged into: ${{ github.event.pull_request.base.ref }}"
+          echo "PR title: ${{ github.event.pull_request.title }}"
+          echo "Merge commit: ${{ github.event.pull_request.merge_commit_sha }}"
+
+      - name: Deploy based on environment
+        run: |
+          ENVIRONMENT="${{ github.event.pull_request.base.ref }}"
+          echo "🚀 Deploying to $ENVIRONMENT environment"
+          
+          case $ENVIRONMENT in
+            dev)
+              echo "Running DEV deployment..."
+              # Add your dev deployment commands here
+              ;;
+            uat)
+              echo "Running UAT deployment..."
+              # Add your UAT deployment commands here
+              ;;
+            prod)
+              echo "Running PRODUCTION deployment..."
+              # Add your production deployment commands here
+              ;;
+          esac
