@@ -1,4 +1,4 @@
-name: Promote Dev to UAT
+name: "2. Promote Dev to UAT"
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ on:
         description: 'Reason for promotion'
         required: true
         type: string
+        default: 'DEV testing successful'
 
 permissions:
   contents: write
@@ -28,95 +29,115 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate deployment commit
+      - name: Validate commit
+        id: validate-commit
         run: |
           COMMIT_SHA="${{ github.event.inputs.deployment_commit }}"
-          git fetch origin dev
+          echo "Validating commit: $COMMIT_SHA"
           
-          # Verify commit exists in dev branch
-          if ! git merge-base --is-ancestor "$COMMIT_SHA" origin/dev 2>/dev/null; then
-            echo "❌ Commit $COMMIT_SHA is not in dev branch"
+          # Verify commit exists
+          if ! git cat-file -e $COMMIT_SHA^{commit} 2>/dev/null; then
+            echo "❌ Error: Commit $COMMIT_SHA does not exist"
             exit 1
           fi
           
+          # Verify commit is in dev branch
+          git fetch origin dev
+          if ! git merge-base --is-ancestor $COMMIT_SHA origin/dev 2>/dev/null; then
+            echo "❌ Error: Commit $COMMIT_SHA is not in dev branch"
+            echo "💡 Make sure the commit has been merged to dev first"
+            exit 1
+          fi
+          
+          # Get commit details
+          COMMIT_INFO=$(git log $COMMIT_SHA -1 --format="%h - %s - %an - %ad")
+          COMMIT_AUTHOR=$(git log $COMMIT_SHA -1 --format="%an")
+          COMMIT_MESSAGE=$(git log $COMMIT_SHA -1 --format="%s")
+          
+          echo "commit_info=$COMMIT_INFO" >> $GITHUB_OUTPUT
+          echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
+          
+          echo "✅ Commit validated: $COMMIT_INFO"
 
-      - name: Get commits since last UAT deployment
-        id: get_commits
-        run: |
-          git fetch origin uat
-          
-          # Get commits that are in dev but not in uat
-          COMMITS_IN_DEV_NOT_UAT=$(git log origin/uat..origin/dev --oneline --reverse)
-          COMMIT_COUNT=$(git rev-list --count origin/uat..origin/dev)
-          
-          # Filter to get only the specific commit and its dependencies
-          SPECIFIC_COMMIT_INFO=$(git log "$COMMIT_SHA" -1 --format="%h %s %an %ad")
-          
-          echo "all_commits=${COMMITS_IN_DEV_NOT_UAT}" >> $GITHUB_OUTPUT
-          echo "commit_count=${COMMIT_COUNT}" >> $GITHUB_OUTPUT
-          echo "specific_commit_info=${SPECIFIC_COMMIT_INFO}" >> $GITHUB_OUTPUT
-
-      - name: Create UAT Promotion PR
+      - name: Create UAT promotion PR
         uses: actions/github-script@v7
         env:
           COMMIT_SHA: ${{ env.COMMIT_SHA }}
+          DEPLOYMENT_REASON: ${{ github.event.inputs.deployment_reason }}
         with:
           script: |
             const commitSha = process.env.COMMIT_SHA;
-            const deploymentReason = '${{ github.event.inputs.deployment_reason }}';
-            const specificCommitInfo = '${{ steps.get_commits.outputs.specific_commit_info }}';
-
-            // Create promotion branch from current uat
-            const promoteBranch = `promote/uat-${commitSha.substring(0, 8)}-${Date.now()}`;
+            const deploymentReason = process.env.DEPLOYMENT_REASON;
+            const commitInfo = '${{ steps.validate-commit.outputs.commit_info }}';
+            const commitAuthor = '${{ steps.validate-commit.outputs.commit_author }}';
+            const commitMessage = '${{ steps.validate-commit.outputs.commit_message }}';
             
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/heads/${promoteBranch}`,
-              sha: context.sha
-            });
-
-            // Cherry-pick the specific commit to promotion branch
+            // Create unique promotion branch
+            const timestamp = Date.now();
+            const promoteBranch = `promote/uat-${commitSha.substring(0, 8)}-${timestamp}`;
+            
             try {
+              // Get current uat SHA
+              const { data: uatRef } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'uat'
+              });
+              
+              // Create promotion branch from uat
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/heads/${promoteBranch}`,
+                sha: uatRef.commit.sha
+              });
+              
+              // Merge the specific commit into promotion branch
               await github.rest.repos.merge({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 base: promoteBranch,
                 head: commitSha
               });
+              
+              const prBody = `
+              ## 🟡 Promotion to UAT Environment
+              **Commit:** ${commitInfo}
+              **SHA:** ${commitSha}
+              **Author:** ${commitAuthor}
+              **Message:** ${commitMessage}
+              **Promotion Reason:** ${deploymentReason}
+              
+              ### Verification Status:
+              ✅ **Tested in DEV**: This specific change has been validated in development environment
+              
+              **Approval Required**: Team lead or manager approval needed for UAT promotion.
+              
+              *Auto-generated by GitHub Actions*
+              `;
+              
+              const { data: pr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🟡 UAT: Promote ${commitSha.substring(0, 8)} - ${commitMessage}`,
+                body: prBody,
+                head: promoteBranch,
+                base: 'uat'
+              });
+              
+              console.log(`✅ Created UAT promotion PR: ${pr.html_url}`);
+              
+              // Add labels
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: ['uat-promotion', 'specific-commit', 'environment-uat']
+              });
+              
             } catch (error) {
-              // If merge fails, try cherry-pick approach
-              console.log('Merge failed, may need manual intervention');
+              console.error('❌ Failed to create UAT promotion PR:', error);
               throw error;
             }
-
-            const prBody = `
-            ## 🟡 Promotion to UAT Environment
-            **Source Commit:** ${commitSha}
-            **Commit Details:** ${specificCommitInfo}
-            **Promotion Reason:** ${deploymentReason}
-            
-            **This promotion contains ONLY the specified tested commit.**
-            
-            ✅ **Verified in DEV**: This specific change has been tested in DEV environment.
-            `;
-
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🟡 UAT: Promote ${commitSha.substring(0, 8)}`,
-              body: prBody,
-              head: promoteBranch,
-              base: 'uat'
-            });
-
-            console.log(`✅ Created UAT promotion PR: ${pr.html_url}`);
-            
-            // Add labels for tracking
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              labels: ['uat-promotion', 'specific-commit']
-            });

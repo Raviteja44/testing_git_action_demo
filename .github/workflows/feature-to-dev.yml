@@ -1,16 +1,23 @@
-name: Deploy Feature to Dev
+name: "1. Deploy Feature to Dev"
 
 on:
+  push:
+    branches: 
+      - '**'
+  pull_request:
+    branches: [dev]
   workflow_dispatch:
     inputs:
       feature_branch:
-        description: 'Feature branch name'
+        description: 'Feature branch to deploy (use "owner:branch" for forks)'
         required: true
         type: string
+        default: 'feature/'
       deployment_reason:
         description: 'Reason for deployment'
         required: true
         type: string
+        default: 'Development testing'
 
 permissions:
   contents: write
@@ -28,88 +35,167 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate feature branch
+      - name: Determine feature branch
+        id: determine-branch
         run: |
-          FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
-          git fetch origin "$FEATURE_BRANCH" || {
-            echo "❌ Feature branch '$FEATURE_BRANCH' not found"
-            exit 1
-          }
+          # For push events, use the current branch
+          if [ "${{ github.event_name }}" == "push" ]; then
+            FEATURE_BRANCH="${GITHUB_REF#refs/heads/}"
+          # For workflow_dispatch, use the input
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
+          # For PR events, use the head branch
+          else
+            FEATURE_BRANCH="${{ github.head_ref }}"
+          fi
+          
+          echo "Feature branch: $FEATURE_BRANCH"
+          echo "feature_branch=$FEATURE_BRANCH" >> $GITHUB_OUTPUT
           echo "FEATURE_BRANCH=$FEATURE_BRANCH" >> $GITHUB_ENV
 
-      - name: Get feature branch commits not in dev
-        id: get_commits
+      - name: Validate feature branch
+        id: validate
         run: |
-          git fetch origin dev
+          FEATURE_BRANCH="${{ steps.determine-branch.outputs.feature_branch }}"
+          echo "Validating feature branch: $FEATURE_BRANCH"
           
-          # Get commits that are in feature branch but not in dev
-          COMMITS=$(git log origin/dev..origin/$FEATURE_BRANCH --oneline --reverse | head -10)
-          COMMIT_COUNT=$(git rev-list --count origin/dev..origin/$FEATURE_BRANCH)
+          # Handle fork branches (owner:branch format)
+          if [[ "$FEATURE_BRANCH" == *":"* ]]; then
+            OWNER="${FEATURE_BRANCH%:*}"
+            BRANCH_NAME="${FEATURE_BRANCH#*:}"
+            echo "Fork branch detected - Owner: $OWNER, Branch: $BRANCH_NAME"
+          else
+            BRANCH_NAME="$FEATURE_BRANCH"
+          fi
           
-          echo "commits=${COMMITS}" >> $GITHUB_OUTPUT
-          echo "commit_count=${COMMIT_COUNT}" >> $GITHUB_OUTPUT
-          echo "latest_commit=$(git rev-parse origin/$FEATURE_BRANCH)" >> $GITHUB_OUTPUT
-          
-          if [ $COMMIT_COUNT -eq 0 ]; then
-            echo "❌ No new commits to deploy"
+          # Check if branch exists
+          if ! git show-ref --verify --quiet refs/remotes/origin/$BRANCH_NAME 2>/dev/null; then
+            echo "❌ Error: Branch '$BRANCH_NAME' does not exist in this repository"
+            echo "💡 For fork branches, use format: 'owner:branch-name'"
             exit 1
           fi
+          
+          echo "✅ Branch validation passed"
 
-      - name: Create Dev Deployment PR
+      - name: Get commits to deploy
+        id: get-commits
+        run: |
+          FEATURE_BRANCH="${{ steps.determine-branch.outputs.feature_branch }}"
+          
+          # Handle fork branches for fetching
+          if [[ "$FEATURE_BRANCH" == *":"* ]]; then
+            OWNER="${FEATURE_BRANCH%:*}"
+            BRANCH_NAME="${FEATURE_BRANCH#*:}"
+            # For forks, we rely on the branch being already available or use a different approach
+            echo "Fork branch - assuming branch is available"
+          else
+            BRANCH_NAME="$FEATURE_BRANCH"
+            git fetch origin $BRANCH_NAME
+          fi
+          
+          git fetch origin dev
+          
+          # Get commits in feature branch but not in dev
+          COMMITS=$(git log origin/dev..origin/$BRANCH_NAME --oneline --reverse 2>/dev/null || echo "No commits found")
+          COMMIT_COUNT=$(git rev-list --count origin/dev..origin/$BRANCH_NAME 2>/dev/null || echo "0")
+          
+          if [ "$COMMIT_COUNT" -eq "0" ]; then
+            echo "⚠️ No new commits to deploy. Branch might be already merged or up to date."
+            echo "commits=none" >> $GITHUB_OUTPUT
+            echo "commit_count=0" >> $GITHUB_OUTPUT
+          else
+            echo "📋 Commits to deploy ($COMMIT_COUNT):"
+            echo "$COMMITS"
+            echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+            echo "commit_count=$COMMIT_COUNT" >> $GITHUB_OUTPUT
+            echo "latest_commit=$(git rev-parse origin/$BRANCH_NAME)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create deployment PR
+        if: steps.get-commits.outputs.commit_count != '0'
         uses: actions/github-script@v7
         env:
-          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
-          COMMIT_COUNT: ${{ steps.get_commits.outputs.commit_count }}
-          LATEST_COMMIT: ${{ steps.get_commits.outputs.latest_commit }}
+          FEATURE_BRANCH: ${{ steps.determine-branch.outputs.feature_branch }}
+          DEPLOYMENT_REASON: ${{ github.event.inputs.deployment_reason }}
         with:
           script: |
             const featureBranch = process.env.FEATURE_BRANCH;
-            const commitCount = process.env.COMMIT_COUNT;
-            const latestCommit = process.env.LATEST_COMMIT;
-            const deploymentReason = '${{ github.event.inputs.deployment_reason }}';
-
-            // Create a unique deployment branch
-            const deployBranch = `deploy/dev-${featureBranch.replace(/\//g, '-')}-${Date.now()}`;
+            const deploymentReason = process.env.DEPLOYMENT_REASON || 'Automated deployment';
+            const commitCount = '${{ steps.get-commits.outputs.commit_count }}';
+            const commits = `${{ steps.get-commits.outputs.commits }}`;
+            const latestCommit = '${{ steps.get-commits.outputs.latest_commit }}';
             
-            // Create deployment branch from current dev
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/heads/${deployBranch}`,
-              sha: context.sha
-            });
-
-            // Merge feature branch into deployment branch
-            await github.rest.repos.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              base: deployBranch,
-              head: featureBranch
-            });
-
-            const prBody = `
-            ## 🚀 Deployment to DEV Environment
-            **Feature Branch:** ${featureBranch}
-            **Commits to Deploy:** ${commitCount}
-            **Latest Commit:** ${latestCommit}
-            **Deployment Reason:** ${deploymentReason}
+            // Create unique deployment branch name
+            const safeBranchName = featureBranch.replace(/[\/#:]/g, '-');
+            const timestamp = Date.now();
+            const deployBranch = `deploy/dev-${safeBranchName}-${timestamp}`;
             
-            **Changes included in this deployment:**
-            \`\`\`
-            ${{ steps.get_commits.outputs.commits }}
-            \`\`\`
-            
-            **Note:** This PR contains ONLY commits from ${featureBranch} that are not in dev.
-            `;
+            try {
+              // Get current dev SHA
+              const { data: devRef } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'dev'
+              });
+              
+              // Create deployment branch from dev
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/heads/${deployBranch}`,
+                sha: devRef.commit.sha
+              });
+              
+              // Merge feature into deployment branch
+              await github.rest.repos.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                base: deployBranch,
+                head: featureBranch
+              });
+              
+              const prBody = `
+              ## 🚀 Deployment to DEV Environment
+              **Feature Branch:** ${featureBranch}
+              **Commits to Deploy:** ${commitCount}
+              **Latest Commit:** ${latestCommit ? latestCommit.substring(0, 8) : 'N/A'}
+              **Deployment Reason:** ${deploymentReason}
+              
+              ### Changes included:
+              \`\`\`
+              ${commits}
+              \`\`\`
+              
+              **Approval Required:** This deployment requires review and approval.
+              
+              *Auto-generated by GitHub Actions*
+              `;
+              
+              const { data: pr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🔵 DEV: Deploy ${featureBranch}`,
+                body: prBody,
+                head: deployBranch,
+                base: 'dev'
+              });
+              
+              console.log(`✅ Created DEV deployment PR: ${pr.html_url}`);
+              
+              // Add labels for better organization
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: ['dev-deployment', 'automated-pr', 'environment-dev']
+              });
+              
+            } catch (error) {
+              console.error('❌ Failed to create deployment PR:', error);
+              throw error;
+            }
 
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🔵 DEV: Deploy ${featureBranch}`,
-              body: prBody,
-              head: deployBranch,
-              base: 'dev'
-            });
-
-            console.log(`✅ Created DEV deployment PR: ${pr.html_url}`);
-            return pr.number;
+      - name: Skip deployment (no changes)
+        if: steps.get-commits.outputs.commit_count == '0'
+        run: |
+          echo "✅ No changes to deploy. Branch is up to date with dev."

@@ -1,4 +1,4 @@
-name: On Merge Deploy
+name: "4. On Merge Deploy"
 
 on:
   pull_request:
@@ -14,30 +14,57 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
 
-      - name: Extract branch info
-        id: extract_branch
+      - name: Extract deployment info
+        id: deployment-info
         run: |
-          echo "PR merged into: ${{ github.event.pull_request.base.ref }}"
-          echo "PR title: ${{ github.event.pull_request.title }}"
-          echo "Merge commit: ${{ github.event.pull_request.merge_commit_sha }}"
-
-      - name: Deploy based on environment
-        run: |
-          ENVIRONMENT="${{ github.event.pull_request.base.ref }}"
-          echo "🚀 Deploying to $ENVIRONMENT environment"
+          echo "🚀 Starting deployment to: ${{ github.event.pull_request.base.ref }}"
+          echo "PR Title: ${{ github.event.pull_request.title }}"
+          echo "PR Number: ${{ github.event.pull_request.number }}"
+          echo "Merge SHA: ${{ github.event.pull_request.merge_commit_sha }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "Source Branch: ${{ github.event.pull_request.head.ref }}"
           
-          case $ENVIRONMENT in
-            dev)
-              echo "Running DEV deployment..."
-              # Add your dev deployment commands here
-              ;;
-            uat)
-              echo "Running UAT deployment..."
-              # Add your UAT deployment commands here
-              ;;
-            prod)
-              echo "Running PRODUCTION deployment..."
-              # Add your production deployment commands here
-              ;;
-          esac
+          # Set environment variables
+          echo "TARGET_ENV=${{ github.event.pull_request.base.ref }}" >> $GITHUB_ENV
+          echo "MERGE_SHA=${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_ENV
+
+      - name: Deploy to Environment
+        run: |
+          echo "📍 Starting deployment to $TARGET_ENV environment"
+          echo "📦 Deploying commit: $MERGE_SHA"
+          
+          # Simulate deployment steps - REPLACE WITH YOUR ACTUAL DEPLOYMENT
+          echo "1. 📥 Fetching latest code..."
+          echo "2. 🧪 Running tests..."
+          echo "3. 🏗️ Building application..."
+          echo "4. 🚀 Deploying to $TARGET_ENV..."
+          echo "5. ✅ Running health checks..."
+          
+          # Example deployment commands (replace with your actual commands):
+          # case $TARGET_ENV in
+          #   dev)
+          #     ./deploy-scripts/deploy-dev.sh
+          #     ;;
+          #   uat)
+          #     ./deploy-scripts/deploy-uat.sh
+          #     ;;
+          #   prod)
+          #     ./deploy-scripts/deploy-prod.sh
+          #     ;;
+          # esac
+          
+          echo "🎉 Deployment to $TARGET_ENV completed successfully!"
+
+      - name: Send deployment notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "📢 Deployment to $TARGET_ENV succeeded ✅"
+            echo "Commit: $MERGE_SHA"
+          else
+            echo "❌ Deployment to $TARGET_ENV failed"
+            echo "Please check the workflow logs for details."
+          fi
