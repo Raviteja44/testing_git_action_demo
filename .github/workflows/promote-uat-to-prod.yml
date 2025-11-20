@@ -1,11 +1,6 @@
 name: "3. Promote UAT to Prod"
 
 on:
-  # Add these to make workflow visible in Actions tab
-  push:
-    branches: [uat]
-  pull_request:
-    branches: [prod]
   workflow_dispatch:
     inputs:
       deployment_commit:
@@ -40,6 +35,12 @@ jobs:
           COMMIT_SHA="${{ github.event.inputs.deployment_commit }}"
           echo "Validating commit: $COMMIT_SHA"
           
+          if [ -z "$COMMIT_SHA" ]; then
+            echo "❌ Error: Commit SHA is empty"
+            echo "💡 Please provide a valid commit SHA from the uat branch"
+            exit 1
+          fi
+          
           # Verify commit exists
           if ! git cat-file -e $COMMIT_SHA^{commit} 2>/dev/null; then
             echo "❌ Error: Commit $COMMIT_SHA does not exist"
@@ -59,7 +60,7 @@ jobs:
           COMMIT_AUTHOR=$(git log $COMMIT_SHA -1 --format="%an")
           COMMIT_MESSAGE=$(git log $COMMIT_SHA -1 --format="%s")
           
-          # FIX: Proper output format
+          # Proper output format
           {
             echo "commit_info<<EOF"
             echo "$COMMIT_INFO"

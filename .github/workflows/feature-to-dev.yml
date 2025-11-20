@@ -4,15 +4,12 @@ on:
   push:
     branches: 
       - '**'
-  pull_request:
-    branches: [dev]
   workflow_dispatch:
     inputs:
       feature_branch:
-        description: 'Feature branch to deploy (use "owner:branch" for forks)'
+        description: 'Feature branch to deploy'
         required: true
         type: string
-        default: 'feature/'
       deployment_reason:
         description: 'Reason for deployment'
         required: true
@@ -42,11 +39,8 @@ jobs:
           if [ "${{ github.event_name }}" == "push" ]; then
             FEATURE_BRANCH="${GITHUB_REF#refs/heads/}"
           # For workflow_dispatch, use the input
-          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
-          # For PR events, use the head branch
           else
-            FEATURE_BRANCH="${{ github.head_ref }}"
+            FEATURE_BRANCH="${{ github.event.inputs.feature_branch }}"
           fi
           
           echo "Feature branch: $FEATURE_BRANCH"
@@ -94,11 +88,11 @@ jobs:
           
           git fetch origin dev
           
-          # Get commits in feature branch but not in dev - FIXED: Use proper output format
+          # Get commits in feature branch but not in dev
           COMMITS=$(git log origin/dev..origin/$BRANCH_NAME --oneline --reverse 2>/dev/null | head -20 || echo "No commits found")
           COMMIT_COUNT=$(git rev-list --count origin/dev..origin/$BRANCH_NAME 2>/dev/null || echo "0")
           
-          # FIX: Properly format output to handle multi-line content
+          # Properly format output to handle multi-line content
           {
             echo "commits<<EOF"
             echo "$COMMITS"
