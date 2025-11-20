@@ -3,10 +3,7 @@ name: "1. Deploy Feature to Dev"
 on:
   push:
     branches: 
-      - 'feature/**'
-      - 'bugfix/**'
-      - 'hotfix/**'
-      - 'release/**'
+      - '**'
   pull_request:
     branches: [dev]
   workflow_dispatch:
